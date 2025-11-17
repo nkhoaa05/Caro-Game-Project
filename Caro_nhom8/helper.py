@@ -1,98 +1,145 @@
+# helper.py
 from json import dumps, loads
 from socket import socket
-from threading import Thread
+from threading import Thread, Lock
 from typing import Any, Literal
 from random import shuffle
 from common import CHARS, Char, Code
 
-# ================== Encode/Decode ==================
+# Game constants
+BOARD_SIZE = 10
+WIN_COUNT = 5
 
+# ================== encoder / decoder ==================
 def encoder(data: dict[str, Any]) -> bytes:
     return dumps(data).encode()
 
 def decoder(data: bytes) -> dict[str, Any]:
-    return loads(data)
+    try:
+        if isinstance(data, bytes):
+            return loads(data.decode())
+        if isinstance(data, str):
+            return loads(data)
+    except Exception:
+        return {}
 
-# ================== Game Logic ==================
-
-BOARD_SIZE = 10   # 10x10
-WIN_COUNT = 5     # cần 5 dấu liên tiếp để thắng
-
+# ================== Game logic for 1D board (len = BOARD_SIZE*BOARD_SIZE) ==================
 def is_draw(board_position: list[str]) -> bool:
-    for char in board_position:
-        if char not in CHARS:
+    # board_position is a list of length BOARD_SIZE*BOARD_SIZE
+    for cell in board_position:
+        if cell not in CHARS:
             return False
     return True
 
 def is_won(board_position: list[str], char: str) -> bool:
-    # Chuyển list 1D thành ma trận 2D
-    board = [board_position[i * BOARD_SIZE:(i + 1) * BOARD_SIZE] for i in range(BOARD_SIZE)]
+    # Interpret board_position as row-major
+    size = BOARD_SIZE
+    N = WIN_COUNT
 
-    # Kiểm tra thắng ngang, dọc, chéo
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            if board[r][c] != char:
+    def at(r, c):
+        return board_position[r * size + c]
+
+    for r in range(size):
+        for c in range(size):
+            if at(r, c) != char:
                 continue
 
-            # Ngang →
-            if c + WIN_COUNT <= BOARD_SIZE and all(board[r][c + k] == char for k in range(WIN_COUNT)):
+            # horizontal
+            if c + N <= size and all(at(r, c + k) == char for k in range(N)):
                 return True
-            # Dọc ↓
-            if r + WIN_COUNT <= BOARD_SIZE and all(board[r + k][c] == char for k in range(WIN_COUNT)):
+            # vertical
+            if r + N <= size and all(at(r + k, c) == char for k in range(N)):
                 return True
-            # Chéo ↘
-            if r + WIN_COUNT <= BOARD_SIZE and c + WIN_COUNT <= BOARD_SIZE and all(board[r + k][c + k] == char for k in range(WIN_COUNT)):
+            # diagonal down-right
+            if r + N <= size and c + N <= size and all(at(r + k, c + k) == char for k in range(N)):
                 return True
-            # Chéo ↙
-            if r + WIN_COUNT <= BOARD_SIZE and c - WIN_COUNT >= -1 and all(board[r + k][c - k] == char for k in range(WIN_COUNT)):
+            # diagonal down-left
+            if r + N <= size and c - N >= -1 and all(at(r + k, c - k) == char for k in range(N)):
                 return True
     return False
 
-# ================== Server Communication ==================
+# ================== Server room management & relay ==================
+_rooms_lock = Lock()
+_rooms: dict[str, list[socket]] = {}  # room_name -> list of sockets (max 2)
 
-def handle_client(client: socket, friend: socket, chance: Literal[1, 0], char: str) -> None:
-    client.send(encoder({Code.CHANCE_CODE: chance, Code.CHAR_CODE: char}))
+def _send_json_safe(sock: socket, data: dict[str, Any]) -> None:
+    try:
+        sock.sendall(encoder(data))
+    except Exception:
+        # ignore send errors here
+        pass
 
-    while True:
+def _relay(src: socket, dst: socket) -> None:
+    """Relay loop from src to dst until connection closes or match ends."""
+    try:
+        while True:
+            raw = src.recv(4096)
+            if not raw:
+                # inform dst that opponent left
+                _send_json_safe(dst, {Code.MATCH_CODE: Char.MATCH_LEFT_CODE})
+                break
+            try:
+                msg = decoder(raw)
+            except Exception:
+                break
+            if not msg:
+                continue
+            # forward message to dst
+            _send_json_safe(dst, msg)
+            # if message ends the match, break
+            if msg.get(Code.MATCH_CODE) and msg[Code.MATCH_CODE] != Char.MATCH_NORMAL_CHAR:
+                break
+    except Exception:
+        pass
+    finally:
         try:
-            recived_data = decoder(client.recv(4096))
-        except:
-            break
+            src.close()
+        except Exception:
+            pass
 
-        if not recived_data:
-            break
-
-        friend.sendall(encoder(recived_data))
-
-        if recived_data[Code.MATCH_CODE] != Char.MATCH_NORMAL_CHAR:
-            break
-
-def handle_friends(_friends: tuple[socket, socket]) -> None:
-    turn_list = [0, 1]
-    char_list = CHARS
-    shuffle(turn_list)
-    shuffle(char_list)
-
-    Thread(target=handle_client, args=(*_friends, turn_list[0], char_list)).start()
-    Thread(target=handle_client, args=(*_friends[::-1], turn_list[1], char_list[::-1])).start()
-
-def server_starter(server: socket) -> None:
-    waiting_client: socket | None = None
-
-    while True:
-        try:
-            client, _ = server.accept()
-            print(f"Client connected from {client.getpeername()}")
-        except Exception as e:
-            print("Error while waiting for client:", e)
-            server.close()
-            break
-
-        if waiting_client is None:
-            waiting_client = client
-            client.send(encoder({Code.FRIEND_CODE: 0}))
+def add_client_to_room(room_name: str, client_sock: socket) -> tuple[bool, str]:
+    """
+    Add client to room.
+    Returns (ok, message). ok=True if joined or paired successfully.
+    """
+    with _rooms_lock:
+        lst = _rooms.get(room_name)
+        if lst is None:
+            _rooms[room_name] = [client_sock]
+            return True, "WAITING"
         else:
-            client.send(encoder({Code.FRIEND_CODE: 1}))
-            waiting_client.send(encoder({Code.FRIEND_CODE: 1}))
-            Thread(target=handle_friends, args=((client, waiting_client),)).start()
-            waiting_client = None
+            if len(lst) == 0:
+                _rooms[room_name].append(client_sock)
+                return True, "WAITING"  # should not happen usually
+            elif len(lst) == 1:
+                lst.append(client_sock)
+                return True, "START"
+            else:
+                return False, "FULL"
+
+def start_room_game(room_name: str) -> None:
+    """Start game for the room (assumes two sockets present)."""
+    with _rooms_lock:
+        pair = _rooms.get(room_name)
+        if not pair or len(pair) < 2:
+            return
+        a, b = pair[0], pair[1]
+
+    # Decide turns and chars
+    turn_list = [1, 0]  # 1 means first player gets chance=1 (first move)
+    shuffle(turn_list)
+    chars = CHARS[:]  # ["X","O"]
+    shuffle(chars)
+
+    # For client a: chance = turn_list[0], char list = chars (so a sees char[0] as theirs)
+    # For client b: chance = turn_list[1], char list = chars[::-1]
+    _send_json_safe(a, {Code.CHANCE_CODE: turn_list[0], Code.CHAR_CODE: chars})
+    _send_json_safe(b, {Code.CHANCE_CODE: turn_list[1], Code.CHAR_CODE: chars[::-1]})
+
+    # Start relay threads both directions
+    Thread(target=_relay, args=(a, b), daemon=True).start()
+    Thread(target=_relay, args=(b, a), daemon=True).start()
+
+def remove_room(room_name: str) -> None:
+    with _rooms_lock:
+        _rooms.pop(room_name, None)

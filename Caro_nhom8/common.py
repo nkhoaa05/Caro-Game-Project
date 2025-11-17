@@ -1,3 +1,4 @@
+# common.py
 CHARS = ["X", "O"]
 
 class Code:
@@ -7,6 +8,7 @@ class Code:
     CHANCE_CODE = "CHANCE"
     CHAR_CODE = "CHAR"
     MATCH_CODE = "MATCH"
+    ROOM_CODE = "ROOM"   # client gửi tên phòng
 
 class Char:
     MATCH_WIN_CHAR = "WON"

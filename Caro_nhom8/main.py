@@ -1,3 +1,4 @@
+# main.py
 import sys
 from client import client_handler
 from server import server_handler
@@ -15,6 +16,7 @@ if sys.argv[1] == "help":
 
 if len(sys.argv) >= 3:
     HOST = sys.argv[2]
+
 if len(sys.argv) == 4:
     PORT = int(sys.argv[3])
 
