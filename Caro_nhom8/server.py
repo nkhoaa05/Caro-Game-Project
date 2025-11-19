@@ -28,7 +28,6 @@ def server_handler(host="127.0.0.1", port=5000):
         srv.close()
 
 def handle_client(sock, addr):
-    player_id = str(uuid.uuid4())[:8]
     try:
         while True:
             msg = recv_msg(sock)
@@ -38,16 +37,12 @@ def handle_client(sock, addr):
                 break
             code = msg.get('code')
             payload = msg.get('payload')
-            # print("Received", code, payload)
             if code == Code.JOIN_ROOM:
-                # payload: { 'action': 'CREATE' } or { 'action': 'JOIN', 'room_id': '...' }
-                handle_join_room(sock, addr, player_id, payload)
+                handle_join_room(sock, addr, payload)
             elif code == Code.ROOM_CODE:
-                # payload: "LIST"
                 if payload == "LIST":
                     send_room_list(sock)
             elif code == Code.MESSAGE_CODE:
-                # relay chat in room
                 handle_chat(sock, payload)
             elif code == Code.MATCH_MOVE:
                 handle_move(sock, payload)
@@ -72,17 +67,17 @@ def handle_client(sock, addr):
         except:
             pass
 
-def handle_join_room(sock, addr, player_id, payload):
+def handle_join_room(sock, addr, payload):
     action = payload.get('action')
     with LOCK:
         if action == "CREATE":
             room_id = str(uuid.uuid4())[:6]
             rooms[room_id] = {
-                'players': [(sock, addr, player_id)],
+                'players': [(sock, addr, "Player 1")],
                 'state': make_new_state(),
             }
-            clients[sock] = {'room_id': room_id, 'player_id': player_id}
-            send_msg(sock, {'code': Code.JOIN_ROOM, 'payload': {'status': 'WAIT', 'room_id': room_id}})
+            clients[sock] = {'room_id': room_id, 'player_id': "Player 1"}
+            send_msg(sock, {'code': Code.JOIN_ROOM, 'payload': {'status': 'WAIT', 'room_id': room_id, 'player_id': "Player 1"}})
             print(f"Room {room_id} created by {addr}")
         elif action == "JOIN":
             room_id = payload.get('room_id')
@@ -93,20 +88,28 @@ def handle_join_room(sock, addr, player_id, payload):
             if len(room['players']) >= 2:
                 send_msg(sock, {'code': Code.ERROR, 'payload': 'Room full'})
                 return
-            room['players'].append((sock, addr, player_id))
-            clients[sock] = {'room_id': room_id, 'player_id': player_id}
-            # start match
-            p1_sock, _, p1_id = room['players'][0]
-            p2_sock, _, p2_id = room['players'][1]
-            # initialize state
-            room['state'] = make_new_state()
-            room['state']['turn'] = p1_id  # p1 starts
-            # assign symbols
-            room['state']['symbols'] = {p1_id: 'X', p2_id: 'O'}
-            # notify both
-            send_msg(p1_sock, {'code': Code.MATCH_START, 'payload': {'you': p1_id, 'opponent': p2_id, 'symbol': 'X', 'room_id': room_id}})
-            send_msg(p2_sock, {'code': Code.MATCH_START, 'payload': {'you': p2_id, 'opponent': p1_id, 'symbol': 'O', 'room_id': room_id}})
-            print(f"Match started in room {room_id} between {p1_id} and {p2_id}")
+            assigned_id = "Player 2"
+            room['players'].append((sock, addr, assigned_id))
+            clients[sock] = {'room_id': room_id, 'player_id': assigned_id}
+
+            if len(room['players']) == 2:
+                # start match
+                p1_sock, _, p1_id = room['players'][0]
+                p2_sock, _, p2_id = room['players'][1]
+                # initialize state
+                room['state'] = make_new_state()
+                room['state']['turn'] = p1_id  # p1 starts
+                room['state']['symbols'] = {p1_id: 'X', p2_id: 'O'}
+                # notify both
+                send_msg(p1_sock, {'code': Code.MATCH_START,
+                                   'payload': {'you': p1_id, 'opponent': p2_id, 'symbol': 'X', 'room_id': room_id, 'first_turn': p1_id}})
+                send_msg(p2_sock, {'code': Code.MATCH_START,
+                                   'payload': {'you': p2_id, 'opponent': p1_id, 'symbol': 'O', 'room_id': room_id, 'first_turn': p1_id}})
+                print(f"Match started in room {room_id} between {p1_id} and {p2_id}")
+            else:
+                # waiting for opponent
+                send_msg(sock, {'code': Code.JOIN_ROOM, 'payload': {'status': 'WAIT', 'room_id': room_id, 'player_id': assigned_id}})
+                print(f"{assigned_id} joined room {room_id}, waiting for opponent")
         else:
             send_msg(sock, {'code': Code.ERROR, 'payload': 'Invalid JOIN_ROOM action'})
 
@@ -119,7 +122,6 @@ def send_room_list(sock):
         send_msg(sock, {'code': Code.ROOM_LIST, 'payload': waiting})
 
 def handle_chat(sock, payload):
-    # payload: {'text': '...'}
     info = clients.get(sock)
     if not info:
         send_msg(sock, {'code': Code.ERROR, 'payload': 'Not in a room'})
@@ -130,13 +132,11 @@ def handle_chat(sock, payload):
         if not room:
             send_msg(sock, {'code': Code.ERROR, 'payload': 'Room not found'})
             return
-        # relay to other player
         for p_sock, _, p_id in room['players']:
             if p_sock != sock:
                 send_msg(p_sock, {'code': Code.MESSAGE_CODE, 'payload': {'from': info['player_id'], 'text': payload.get('text')}})
 
 def handle_move(sock, payload):
-    # payload: {'x': int, 'y': int}
     info = clients.get(sock)
     if not info:
         send_msg(sock, {'code': Code.ERROR, 'payload': 'Not in room'})
@@ -149,7 +149,6 @@ def handle_move(sock, payload):
             send_msg(sock, {'code': Code.ERROR, 'payload': 'Room missing'})
             return
         state = room['state']
-        # If match not started or not two players, ignore
         if len(room['players']) < 2:
             send_msg(sock, {'code': Code.ERROR, 'payload': 'Opponent missing'})
             return
@@ -168,7 +167,6 @@ def handle_move(sock, payload):
             return
         sym = state['symbols'][player_id]
         state['board'][y][x] = sym
-        # check win
         winner = check_winner(state['board'], x, y, sym)
         # determine opponent socket
         opponent_sock = None
@@ -177,20 +175,17 @@ def handle_move(sock, payload):
                 opponent_sock = p_sock
                 opp_id = p_id
                 break
-        # update turn
         if not winner:
             state['turn'] = opp_id
         else:
             state['finished'] = True
             state['result'] = {'winner': player_id}
-        # relay move to opponent and ack to mover
         for p_sock, _, p_id in room['players']:
             send_msg(p_sock, {'code': Code.MATCH_MOVE, 'payload': {'x': x, 'y': y, 'symbol': sym, 'by': player_id, 'winner': winner}})
         if winner:
             print(f"Winner in room {room_id}: {player_id}")
 
 def handle_restart_request(sock, payload):
-    # For simplicity: if one player requests restart, wait for both to send MATCH_RESTART with payload {'agree': True}
     info = clients.get(sock)
     if not info:
         return
@@ -207,12 +202,9 @@ def handle_restart_request(sock, payload):
         if vote:
             state['restart_votes'].add(player_id)
         else:
-            # any disagree cancels votes
             state['restart_votes'] = set()
         if len(state['restart_votes']) >= 2:
-            # reset board and notify both
             room['state'] = make_new_state()
-            # assign same turn to previous starter randomly; we'll set turn to first player's id
             if len(room['players']) == 2:
                 p1_id = room['players'][0][2]
                 room['state']['turn'] = p1_id
@@ -221,13 +213,11 @@ def handle_restart_request(sock, payload):
                 send_msg(p_sock, {'code': Code.MATCH_RESTART, 'payload': {}})
             print(f"Room {room_id} restarted by mutual agreement")
         else:
-            # notify other player that someone wants restart (optional)
             for p_sock, _, p_id in room['players']:
                 if p_id != player_id:
                     send_msg(p_sock, {'code': Code.MATCH_RESTART, 'payload': {'request_from': player_id}})
 
 def handle_leave_room(sock, payload):
-    # payload may be empty
     info = clients.get(sock)
     if not info:
         return
@@ -237,25 +227,20 @@ def handle_leave_room(sock, payload):
         room = rooms.get(room_id)
         if not room:
             return
-        # remove player from room
         new_players = [p for p in room['players'] if p[2] != player_id]
         room['players'] = new_players
-        # notify remaining player
         for p_sock, _, p_id in room['players']:
             send_msg(p_sock, {'code': Code.ROOM_LEAVE, 'payload': {'left_player': player_id}})
-            # also signal match left if match was ongoing
             send_msg(p_sock, {'code': Code.MATCH_LEFT, 'payload': {'left_player': player_id}})
-        # if room empty, delete
         if len(room['players']) == 0:
             del rooms[room_id]
-        # cleanup client mapping for leaving socket
+            print(f"🗑️ Room {room_id} deleted (empty)")
         send_msg(sock, {'code': Code.ROOM_LEAVE_SUCCESS, 'payload': {}})
-        print(f"Player {player_id} left room {room_id} voluntarily")
         try:
             del clients[sock]
         except KeyError:
             pass
-        print(f"Player {player_id} left room {room_id}")
+        print(f"Player {player_id} left room {room_id} voluntarily")
 
 def handle_disconnect(sock):
     info = clients.get(sock)
@@ -265,22 +250,15 @@ def handle_disconnect(sock):
     player_id = info['player_id']
     with LOCK:
         room = rooms.get(room_id)
-        if not room:
-            try:
-                del clients[sock]
-            except:
-                pass
-            return
-        # remove this player
-        new_players = [p for p in room['players'] if p[2] != player_id]
-        room['players'] = new_players
-        # notify remaining
-        for p_sock, _, p_id in room['players']:
-            send_msg(p_sock, {'code': Code.MATCH_LEFT, 'payload': {'left_player': player_id}})
-            send_msg(p_sock, {'code': Code.ROOM_LEAVE, 'payload': {'left_player': player_id}})
-        if len(room['players']) == 0:
-            # delete room
-            del rooms[room_id]
+        if room:
+            new_players = [p for p in room['players'] if p[2] != player_id]
+            room['players'] = new_players
+            for p_sock, _, p_id in room['players']:
+                send_msg(p_sock, {'code': Code.MATCH_LEFT, 'payload': {'left_player': player_id}})
+                send_msg(p_sock, {'code': Code.ROOM_LEAVE, 'payload': {'left_player': player_id}})
+            if len(room['players']) == 0:
+                del rooms[room_id]
+                print(f"🗑️ Room {room_id} deleted (empty due to disconnect)")
         try:
             del clients[sock]
         except:
@@ -297,7 +275,6 @@ def handle_draw_request(sock, payload):
         room = rooms.get(room_id)
         if not room:
             return
-        # forward request to opponent
         for p_sock, _, p_id in room['players']:
             if p_id != player_id:
                 send_msg(p_sock, {'code': Code.MATCH_DRAW_REQUEST, 'payload': {'from': player_id}})
@@ -307,15 +284,12 @@ def handle_draw_accept(sock, payload):
     if not info:
         return
     room_id = info['room_id']
-    player_id = info['player_id']
     with LOCK:
         room = rooms.get(room_id)
         if not room:
             return
-        # mark finish with draw
         room['state']['finished'] = True
         room['state']['result'] = {'draw': True}
-        # notify both
         for p_sock, _, _ in room['players']:
             send_msg(p_sock, {'code': Code.MATCH_DRAW_ACCEPT, 'payload': {}})
 
@@ -329,12 +303,11 @@ def handle_draw_reject(sock, payload):
         room = rooms.get(room_id)
         if not room:
             return
-        # forward reject to opponent
         for p_sock, _, p_id in room['players']:
             if p_id != player_id:
                 send_msg(p_sock, {'code': Code.MATCH_DRAW_REJECT, 'payload': {'from': player_id}})
 
-# helpers for game state
+# helpers
 def make_new_state():
     return {
         'board': [['' for _ in range(10)] for __ in range(10)],
@@ -345,16 +318,13 @@ def make_new_state():
     }
 
 def check_winner(board, x, y, sym):
-    # check 5 in a row (gomoku style) horizontally, vertically, both diagonals
     directions = [(1,0),(0,1),(1,1),(1,-1)]
     for dx, dy in directions:
         cnt = 1
-        # forward
         nx, ny = x+dx, y+dy
         while 0 <= nx < 10 and 0 <= ny < 10 and board[ny][nx] == sym:
             cnt += 1
             nx += dx; ny += dy
-        # backward
         nx, ny = x-dx, y-dy
         while 0 <= nx < 10 and 0 <= ny < 10 and board[ny][nx] == sym:
             cnt += 1
